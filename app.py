@@ -214,9 +214,11 @@ def risk_color(c):
     return {'High Risk': '#E74C3C', 'Medium Risk': '#F39C12', 'Low Risk': '#27AE60', 'Very Low Risk': '#2E86AB'}.get(c, '#888')
 
 
-def process_manual(d, act_ref, geo_risk):
-    total_act, no_groups, w_act_risk, third_party = derive_activity_features(d['activity_codes'], act_ref)
-    ages = [s['age'] for s in d['shareholders'] if s['age'] > 0]
+def dob_to_age(dob):
+    return round((REF_DATE - pd.Timestamp(dob)).days / 365.25, 1)
+
+
+def process_manual(d, geo_risk):
     nats = [s['nationality'] for s in d['shareholders']]
     nat_risks = [geo_risk.get(n, 'Medium') for n in nats if n]
     w_nat_risk = compute_weighted_risk(nat_risks)
@@ -226,25 +228,26 @@ def process_manual(d, act_ref, geo_risk):
     lt = yv[ri]
     cum = sum(yv[:ry])
     trend = 0 if ry <= 1 else yv[ri] - yv[ri - 1]
+    ages = [s['age'] for s in d['shareholders'] if s['age'] > 0]
     row = pd.DataFrame([{
         'Company Name': d['company_name'],
         'License Issue Date': d['issue_date'],
         'License Expiry Date': d['expiry_date'],
-        'Total No of Activities': total_act,
-        'No of Groups Opted': no_groups,
+        'Total No of Activities': d['total_activities'],
+        'No of Groups Opted': d['groups_opted'],
         'Visa Allocation': d['visa_allocation'],
         'Number of Shareholders': d['num_shareholders'],
-        'Third-party Approval Encoded': APPROVAL_MAP.get(third_party, 0),
-        'Weighted Activity Risk Encoded': RISK_MAP.get(w_act_risk, 2),
+        'Third-party Approval Encoded': APPROVAL_MAP.get(d['third_party'], 0),
+        'Weighted Activity Risk Encoded': RISK_MAP.get(d['activity_risk'], 2),
         'Average Shareholder Age': round(np.mean(ages), 1) if ages else 42.8,
         'Weighted Nationality Risk Encoded': RISK_MAP.get(w_nat_risk, 2),
         'Renewal Year': ry,
         'Latest Year Transactions': lt,
         'Cumulative Transactions': cum,
         'Transaction Trend': trend,
-        '_w_act_risk_label': w_act_risk,
+        '_w_act_risk_label': d['activity_risk'],
         '_w_nat_risk_label': w_nat_risk,
-        '_third_party': third_party
+        '_third_party': d['third_party']
     }])
     return add_engineered(row)
 
@@ -340,18 +343,16 @@ st.markdown("""<style>
 .factor-card{background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:.8rem 1rem;margin:.3rem 0}
 .factor-title{font-size:.8rem;color:#888}
 .factor-value{font-size:1.1rem;font-weight:600;color:#1F4E79}
-.derived-box{background:#EBF5FB;border:1px solid #2E86AB;border-radius:8px;padding:1rem;margin:.5rem 0}
+.age-display{background:#F0FFF4;border:1px solid #27AE60;border-radius:6px;padding:.4rem .8rem;margin-top:.3rem;text-align:center;font-weight:600;color:#27AE60}
 </style>""", unsafe_allow_html=True)
 
 st.markdown('<p class="main-header">B2C License Renewal Predictor</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">Meydan Free Zone — Enter company details or upload in bulk to get renewal scores</p>', unsafe_allow_html=True)
 
-# Load everything
 model, metrics = train_model()
 act_ref = load_activity_reference()
 geo_risk = load_geo_risk()
 
-# Validation
 missing_files = []
 if model is None:
     missing_files.append("Training Data")
@@ -365,7 +366,6 @@ if missing_files:
 
 NATIONALITY_LIST = sorted(geo_risk.keys())
 
-# Sidebar
 with st.sidebar:
     st.markdown("### Model Performance")
     st.metric("AUC-ROC", f"{metrics['auc']:.3f}")
@@ -395,8 +395,12 @@ with tab1:
         issue_date = st.date_input("License Issue Date", value=pd.Timestamp('2024-01-01'))
         expiry_date = st.date_input("License Expiry Date", value=pd.Timestamp('2025-12-31'))
         visa_allocation = st.number_input("Visa Allocation", min_value=0, max_value=600, value=2)
-    with cb:
         num_shareholders = st.number_input("Number of Shareholders", min_value=1, max_value=11, value=1)
+    with cb:
+        total_activities = st.number_input("Total No of Activities", min_value=1, max_value=100, value=3)
+        groups_opted = st.number_input("No of Groups Opted", min_value=1, max_value=10, value=2)
+        activity_risk = st.selectbox("Weighted Activity Risk", ['Low', 'Medium', 'High', 'Override'], index=1)
+        third_party = st.selectbox("Third-party Approval Required", ['No', 'Yes'], index=0)
         st.markdown("**Yearly Transactions**")
         yr_cols_input = st.columns(5)
         year_txns = []
@@ -406,36 +410,21 @@ with tab1:
                 year_txns.append(v)
 
     st.markdown("---")
-    st.markdown("### Business Activities")
-    st.caption("Search and select activities. Risk, groups, and third-party approval are auto-calculated.")
-    activity_options = act_ref['display'].tolist()
-    selected_activities = st.multiselect(
-        "Select Activities (search by code or name)",
-        options=activity_options,
-        default=None,
-        placeholder="Type to search... e.g. 'General Trading' or '4690'")
-
-    selected_codes = [a.split(' - ')[0].strip() for a in selected_activities]
-    total_act, no_groups, w_act_risk, third_party = derive_activity_features(selected_codes, act_ref)
-
-    if selected_activities:
-        st.markdown(f"""<div class="derived-box">
-            <strong>Auto-derived:</strong> Activities: <strong>{total_act}</strong> |
-            Groups: <strong>{no_groups}</strong> |
-            Activity Risk: <strong>{w_act_risk}</strong> |
-            Third-party: <strong>{third_party}</strong>
-        </div>""", unsafe_allow_html=True)
-
-    st.markdown("---")
     st.markdown("### Shareholder Details")
+    st.caption("Select date of birth — age is calculated automatically as of 1 Jan 2026.")
     shareholders = []
-    for row_start in range(0, num_shareholders, 4):
-        row_end = min(row_start + 4, num_shareholders)
+    for row_start in range(0, num_shareholders, 3):
+        row_end = min(row_start + 3, num_shareholders)
         cols = st.columns(row_end - row_start)
         for i, col in zip(range(row_start, row_end), cols):
             with col:
                 st.markdown(f"**Shareholder {i+1}**")
-                age = st.number_input("Age", min_value=18, max_value=100, value=35, key=f"sh_age_{i}")
+                dob = st.date_input("Date of Birth", value=pd.Timestamp('1990-01-01'),
+                                    min_value=pd.Timestamp('1920-01-01'),
+                                    max_value=pd.Timestamp('2008-01-01'),
+                                    key=f"sh_dob_{i}")
+                age = dob_to_age(dob)
+                st.markdown(f'<div class="age-display">Age: {age:.0f} years</div>', unsafe_allow_html=True)
                 nationality = st.selectbox("Nationality", NATIONALITY_LIST,
                     index=NATIONALITY_LIST.index('United Arab Emirates'), key=f"sh_nat_{i}")
                 shareholders.append({'age': age, 'nationality': nationality})
@@ -444,16 +433,16 @@ with tab1:
     if st.button("🔍 Calculate Renewal Score", type="primary", use_container_width=True):
         if not company_name.strip():
             st.warning("Please enter a company name.")
-        elif not selected_activities:
-            st.warning("Please select at least one business activity.")
         else:
             data = {
                 'company_name': company_name, 'issue_date': issue_date,
                 'expiry_date': expiry_date, 'visa_allocation': visa_allocation,
-                'num_shareholders': num_shareholders, 'activity_codes': selected_codes,
+                'num_shareholders': num_shareholders,
+                'total_activities': total_activities, 'groups_opted': groups_opted,
+                'activity_risk': activity_risk, 'third_party': third_party,
                 'shareholders': shareholders, 'year_transactions': year_txns}
 
-            processed = process_manual(data, act_ref, geo_risk)
+            processed = process_manual(data, geo_risk)
             prob = model.predict_proba(processed[FEATURE_COLS])[0, 1]
             risk = risk_category(prob)
             emoji = risk_emoji(risk)
@@ -484,9 +473,9 @@ with tab1:
                     st.markdown(f'<div class="factor-card"><div class="factor-title">Txns per Visa</div><div class="factor-value">{vals["Transactions per Visa"]:.1f}</div></div>', unsafe_allow_html=True)
                     st.markdown(f'<div class="factor-card"><div class="factor-title">Trend</div><div class="factor-value">{int(vals["Transaction Trend"]):+d}</div></div>', unsafe_allow_html=True)
                 with f3:
-                    st.markdown(f'<div class="factor-card"><div class="factor-title">Activity Risk</div><div class="factor-value">{vals.get("_w_act_risk_label", w_act_risk)}</div></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="factor-card"><div class="factor-title">Activity Risk</div><div class="factor-value">{activity_risk}</div></div>', unsafe_allow_html=True)
                     st.markdown(f'<div class="factor-card"><div class="factor-title">Nationality Risk</div><div class="factor-value">{vals.get("_w_nat_risk_label", "Medium")}</div></div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="factor-card"><div class="factor-title">Zero Transactions</div><div class="factor-value">{"Yes" if vals["Zero Transactions Flag"]==1 else "No"}</div></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="factor-card"><div class="factor-title">Avg Shareholder Age</div><div class="factor-value">{vals["Average Shareholder Age"]:.0f}</div></div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — BULK UPLOAD
@@ -586,7 +575,7 @@ with tab2:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab3:
     st.markdown("### Manual Input")
-    st.markdown("Select business activities from the searchable dropdown. The app auto-derives Total Activities, Groups Opted, Weighted Activity Risk, and Third-party Approval.")
+    st.markdown("Enter activity count, groups, risk level, and third-party approval directly. For shareholders, select date of birth and the app calculates age automatically.")
 
     st.markdown("### Bulk Upload Format")
     st.markdown("""
@@ -602,11 +591,6 @@ with tab3:
 | Shareholder 1 Nationality | Optional | Country name |
 | Year 1, Year 2, ... | Yes | Transaction counts |
     """)
-
-    st.markdown("### Activity Reference")
-    with st.expander(f"View all {len(act_ref)} activities"):
-        display_act = act_ref[['Code', 'Activity Name', 'Category', 'Group', 'Risk Rating']].copy()
-        st.dataframe(display_act, use_container_width=True, hide_index=True, height=400)
 
     st.markdown("### Nationality Risk Ratings")
     with st.expander(f"View all {len(geo_risk)} countries"):
