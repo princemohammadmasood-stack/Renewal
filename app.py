@@ -15,6 +15,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
+import os
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+from sklearn.model_selection import train_test_split
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import roc_auc_score, brier_score_loss
