@@ -15,16 +15,16 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
-import os
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
-from sklearn.model_selection import train_test_split
+import pathlib
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import roc_auc_score, brier_score_loss
+
 REF_DATE = pd.Timestamp('2026-01-01')
-TRAINING_DATA = "B2C_Renewal_Decision_Data.xlsx"
-ACTIVITY_FILE = "Activity List.xlsx"
-GEO_RISK_FILE = "Geographical Risk Rating List.xlsx"
+APP_DIR = pathlib.Path(__file__).parent.resolve()
+TRAINING_DATA = str(APP_DIR / "B2C_Renewal_Decision_Data.xlsx")
+ACTIVITY_FILE = str(APP_DIR / "Activity List.xlsx")
+GEO_RISK_FILE = str(APP_DIR / "Geographical Risk Rating List.xlsx")
 
 RISK_MAP = {'Low': 1, 'Medium': 2, 'High': 3, 'Override': 4}
 APPROVAL_MAP = {'No': 0, 'Yes': 1}
