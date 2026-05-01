@@ -21,7 +21,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import roc_auc_score, brier_score_loss
-
 REF_DATE = pd.Timestamp('2026-01-01')
 TRAINING_DATA = "B2C_Renewal_Decision_Data.xlsx"
 ACTIVITY_FILE = "Activity List.xlsx"
