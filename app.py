@@ -1,15 +1,16 @@
 """
 B2C License Renewal Prediction App
 ===================================
-Streamlit app that scores new company data for renewal likelihood.
-Trains on historical data, accepts Excel uploads, outputs renewal scores.
+Streamlit app: manual single-company input + bulk Excel upload.
+Loads activity codes and geo risk ratings from reference files.
 
-Setup:
-  pip install streamlit pandas numpy scikit-learn openpyxl xlsxwriter
-  Place "B2C_Renewal_Decision_Data.xlsx" in the same directory as this script.
-  Run: streamlit run app.py
+Required files in same directory:
+  - B2C_Renewal_Decision_Data.xlsx  (training data)
+  - Activity List.xlsx              (activity codes, groups, risk ratings)
+  - Geographical Risk Rating List.xlsx (country risk ratings)
+
+Run: streamlit run app.py
 """
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -18,370 +19,342 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import roc_auc_score, brier_score_loss
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CONFIG
-# ══════════════════════════════════════════════════════════════════════════════
 REF_DATE = pd.Timestamp('2026-01-01')
 TRAINING_DATA = "B2C_Renewal_Decision_Data.xlsx"
+ACTIVITY_FILE = "Activity List.xlsx"
+GEO_RISK_FILE = "Geographical Risk Rating List.xlsx"
 
 RISK_MAP = {'Low': 1, 'Medium': 2, 'High': 3, 'Override': 4}
 APPROVAL_MAP = {'No': 0, 'Yes': 1}
+RISK_LABEL = {1: 'Low', 2: 'Medium', 3: 'High', 4: 'Override'}
 
 FEATURE_COLS = [
     'Visa Allocation', 'Total No of Activities', 'No of Groups Opted',
     'Number of Shareholders', 'Average Shareholder Age', 'Renewal Year',
     'Latest Year Transactions', 'Cumulative Transactions', 'Transaction Trend',
     'Weighted Activity Risk Encoded', 'Weighted Nationality Risk Encoded',
-    'Third-party Approval Encoded',
-    'Zero Transactions Flag', 'Log Latest Transactions',
-    'Log Cumulative Transactions', 'Engagement Ratio',
-    'Transactions per Visa', 'Combined Risk Score'
-]
-
-# Geographical risk ratings (embedded)
-GEO_RISK = {
-    'Afghanistan': 'High', 'Aland Islands': 'Low', 'Albania': 'Medium', 'Algeria': 'High',
-    'American Samoa': 'Low', 'Andorra': 'Medium', 'Angola': 'High', 'Anguilla': 'Low',
-    'Antarctica': 'Low', 'Antigua and Barbuda': 'Medium', 'Argentina': 'High', 'Armenia': 'Low',
-    'Aruba': 'Low', 'Australia': 'Low', 'Austria': 'Low', 'Azerbaijan': 'Medium',
-    'Bahamas': 'Low', 'Bahrain': 'Medium', 'Bangladesh': 'Medium', 'Barbados': 'Medium',
-    'Belarus': 'High', 'Belgium': 'Low', 'Belize': 'Medium', 'Benin': 'Medium',
-    'Bermuda': 'Low', 'Bhutan': 'Medium', 'Bolivia': 'High', 'Bosnia and Herzegovina': 'High',
-    'Botswana': 'Low', 'Brazil': 'Medium', 'British Virgin Islands': 'High', 'Brunei': 'Low',
-    'Bulgaria': 'High', 'Burkina Faso': 'Medium', 'Burundi': 'High', 'Cambodia': 'High',
-    'Cameroon': 'High', 'Canada': 'Low', 'Cape Verde': 'Medium', 'Cayman Islands': 'Medium',
-    'Central African Republic': 'High', 'Chad': 'Medium', 'Chile': 'Low', 'China': 'Medium',
-    'Colombia': 'Medium', 'Comoros': 'Medium', 'Cook Islands': 'Medium', 'Costa Rica': 'Low',
-    'Croatia': 'Medium', 'Cuba': 'High', 'Cyprus': 'Low', 'Czech Republic': 'Low',
-    'Democratic Republic of the Congo': 'High', 'Denmark': 'Low', 'Djibouti': 'Medium',
-    'Dominica': 'Low', 'Dominican Republic': 'Medium', 'East Timor': 'Low', 'Ecuador': 'Medium',
-    'Egypt': 'Medium', 'El Salvador': 'Medium', 'Equatorial Guinea': 'Medium', 'Eritrea': 'Medium',
-    'Estonia': 'Low', 'Ethiopia': 'High', 'Fiji': 'Medium', 'Finland': 'Low', 'France': 'Low',
-    'Gabon': 'Medium', 'Gambia': 'Medium', 'Georgia': 'Medium', 'Germany': 'Low', 'Ghana': 'Medium',
-    'Gibraltar': 'Medium', 'Greece': 'Low', 'Grenada': 'Low', 'Guatemala': 'Medium',
-    'Guinea': 'High', 'Guinea-Bissau': 'High', 'Guyana': 'Medium', 'Haiti': 'High',
-    'Honduras': 'Low', 'Hong Kong': 'High', 'Hungary': 'Low', 'Iceland': 'Low', 'India': 'Medium',
-    'Indonesia': 'Medium', 'Iran': 'Override', 'Iraq': 'High', 'Ireland': 'Medium',
-    'Isle of Man': 'Low', 'Israel': 'Medium', 'Italy': 'Low', 'Ivory Coast': 'High',
-    'Jamaica': 'Medium', 'Japan': 'Low', 'Jersey': 'Low', 'Jordan': 'Medium',
-    'Kazakhstan': 'Medium', 'Kenya': 'High', 'Kiribati': 'Medium', 'Kosovo': 'Medium',
-    'Kuwait': 'High', 'Kyrgyzstan': 'Medium', 'Laos': 'High', 'Latvia': 'Low', 'Lebanon': 'High',
-    'Lesotho': 'Low', 'Liberia': 'High', 'Libya': 'High', 'Liechtenstein': 'Medium',
-    'Lithuania': 'Low', 'Luxembourg': 'Medium', 'Macao': 'Low', 'Macedonia': 'Low',
-    'Madagascar': 'High', 'Malawi': 'Medium', 'Malaysia': 'Low', 'Maldives': 'Medium',
-    'Mali': 'Medium', 'Malta': 'Medium', 'Mauritania': 'Medium', 'Mauritius': 'Low',
-    'Mexico': 'Medium', 'Moldova': 'Medium', 'Monaco': 'High', 'Mongolia': 'Medium',
-    'Montenegro': 'Low', 'Morocco': 'High', 'Mozambique': 'Medium', 'Myanmar': 'Override',
-    'Namibia': 'High', 'Nepal': 'High', 'Netherlands': 'Medium', 'New Zealand': 'Low',
-    'Nicaragua': 'High', 'Niger': 'Medium', 'Nigeria': 'Medium', 'North Korea': 'Override',
-    'Norway': 'Low', 'Oman': 'Low', 'Pakistan': 'High', 'Palau': 'High', 'Palestine': 'High',
-    'Panama': 'Medium', 'Papua New Guinea': 'High', 'Paraguay': 'High', 'Peru': 'Medium',
-    'Philippines': 'Medium', 'Poland': 'Low', 'Portugal': 'Low', 'Qatar': 'Medium',
-    'Republic of Congo': 'High', 'Romania': 'Medium', 'Russia': 'Medium', 'Rwanda': 'Low',
-    'Saint Kitts and Nevis': 'Medium', 'Saint Lucia': 'High', 'Samoa': 'High',
-    'San Marino': 'Low', 'Saudi Arabia': 'Medium', 'Senegal': 'Medium', 'Serbia': 'Medium',
-    'Seychelles': 'Medium', 'Sierra Leone': 'High', 'Singapore': 'Low', 'Slovakia': 'Low',
-    'Slovenia': 'Low', 'Solomon Islands': 'High', 'Somalia': 'High', 'South Africa': 'Medium',
-    'South Korea': 'Low', 'South Sudan': 'High', 'Spain': 'Low', 'Sri Lanka': 'Medium',
-    'Sudan': 'High', 'Suriname': 'Medium', 'Sweden': 'Low', 'Switzerland': 'Medium',
-    'Syria': 'High', 'Taiwan': 'Low', 'Tajikistan': 'Medium', 'Tanzania': 'Medium',
-    'Thailand': 'Medium', 'Togo': 'Medium', 'Tonga': 'High', 'Trinidad and Tobago': 'Low',
-    'Tunisia': 'High', 'Turkey': 'Medium', 'Turkmenistan': 'Medium', 'Tuvalu': 'Medium',
-    'Uganda': 'Medium', 'Ukraine': 'High', 'United Arab Emirates': 'Low',
-    'United Kingdom': 'Low', 'United States': 'Low', 'Uruguay': 'Low', 'Uzbekistan': 'Medium',
-    'Vanuatu': 'Low', 'Venezuela': 'High', 'Vietnam': 'High', 'Yemen': 'High',
-    'Zambia': 'Medium', 'Zimbabwe': 'High'
-}
+    'Third-party Approval Encoded', 'Zero Transactions Flag',
+    'Log Latest Transactions', 'Log Cumulative Transactions',
+    'Engagement Ratio', 'Transactions per Visa', 'Combined Risk Score']
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MODEL TRAINING (cached)
+# LOAD REFERENCE DATA
+# ══════════════════════════════════════════════════════════════════════════════
+@st.cache_data
+def load_activity_reference():
+    try:
+        df = pd.read_excel(ACTIVITY_FILE)
+        # Standardize column names
+        col_map = {}
+        for c in df.columns:
+            cl = c.strip().lower()
+            if cl == 'code': col_map[c] = 'Code'
+            elif 'activity name' in cl or cl == 'activity': col_map[c] = 'Activity Name'
+            elif cl == 'group': col_map[c] = 'Group'
+            elif cl == 'category': col_map[c] = 'Category'
+            elif 'risk' in cl and 'rating' in cl: col_map[c] = 'Risk Rating'
+            elif 'third' in cl and 'party' in cl: col_map[c] = 'Third Party'
+        df.rename(columns=col_map, inplace=True)
+
+        # Clean
+        df = df.dropna(subset=['Code', 'Activity Name'])
+        df['Code'] = df['Code'].astype(str).str.strip()
+        df['Activity Name'] = df['Activity Name'].astype(str).str.strip()
+        df['display'] = df['Code'] + ' - ' + df['Activity Name']
+        df['Risk Rating'] = df['Risk Rating'].astype(str).str.strip().replace({'nan': 'Low', '': 'Low'})
+        df['Group'] = df['Group'].astype(str).str.strip()
+        if 'Third Party' in df.columns:
+            df['Third Party'] = df['Third Party'].astype(str).str.strip()
+        else:
+            df['Third Party'] = ''
+        if 'Category' in df.columns:
+            df['Category'] = df['Category'].astype(str).str.strip()
+        return df
+    except FileNotFoundError:
+        return None
+
+
+@st.cache_data
+def load_geo_risk():
+    try:
+        df = pd.read_excel(GEO_RISK_FILE)
+        # Standardize
+        col_map = {}
+        for c in df.columns:
+            cl = c.strip().lower()
+            if 'country' in cl: col_map[c] = 'Country'
+            elif 'risk' in cl or 'geo' in cl: col_map[c] = 'Risk'
+        df.rename(columns=col_map, inplace=True)
+        df = df.dropna(subset=['Country', 'Risk'])
+        df = df[df['Country'] != 'No filters applied']
+        df['Country'] = df['Country'].astype(str).str.strip()
+        df['Risk'] = df['Risk'].astype(str).str.strip()
+        return dict(zip(df['Country'], df['Risk']))
+    except FileNotFoundError:
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODEL TRAINING
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_resource
 def train_model():
-    """Train the Gradient Boosting model from historical data."""
     try:
         df = pd.read_excel(TRAINING_DATA)
     except FileNotFoundError:
         return None, None
-
     df = df[df['Renewal Decision'].isin(['Renewed', 'Churned'])].reset_index(drop=True)
     df['Target'] = (df['Renewal Decision'] == 'Renewed').astype(int)
-
-    # Encode
     df['Weighted Activity Risk Encoded'] = df['Weighted Activity Risk'].map(RISK_MAP)
     df['Weighted Nationality Risk Encoded'] = df['Weighted Nationality Risk'].map(RISK_MAP)
     df['Third-party Approval Encoded'] = df['Third-party Approval Required'].map(APPROVAL_MAP)
-
-    # Engineer features
     df['Zero Transactions Flag'] = (df['Latest Year Transactions'] == 0).astype(int)
     df['Log Latest Transactions'] = np.log1p(df['Latest Year Transactions'])
     df['Log Cumulative Transactions'] = np.log1p(df['Cumulative Transactions'])
-    df['Engagement Ratio'] = np.where(
-        df['Cumulative Transactions'] > 0,
+    df['Engagement Ratio'] = np.where(df['Cumulative Transactions'] > 0,
         df['Latest Year Transactions'] / df['Cumulative Transactions'], 0)
-    df['Transactions per Visa'] = np.where(
-        df['Visa Allocation'] > 0,
-        df['Latest Year Transactions'] / df['Visa Allocation'],
-        df['Latest Year Transactions'])
+    df['Transactions per Visa'] = np.where(df['Visa Allocation'] > 0,
+        df['Latest Year Transactions'] / df['Visa Allocation'], df['Latest Year Transactions'])
     df['Combined Risk Score'] = df['Weighted Activity Risk Encoded'] + df['Weighted Nationality Risk Encoded']
-
-    X = df[FEATURE_COLS]
-    y = df['Target']
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y)
-
-    model = GradientBoostingClassifier(
-        n_estimators=300, max_depth=3, learning_rate=0.05,
+    X = df[FEATURE_COLS]; y = df['Target']
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    mdl = GradientBoostingClassifier(n_estimators=300, max_depth=3, learning_rate=0.05,
         min_samples_leaf=15, subsample=0.9, random_state=42)
-    model.fit(X_train, y_train)
-
-    y_prob = model.predict_proba(X_test)[:, 1]
-    metrics = {
-        'auc': round(roc_auc_score(y_test, y_prob), 4),
-        'brier': round(brier_score_loss(y_test, y_prob), 4),
-        'accuracy': round((model.predict(X_test) == y_test).mean(), 4),
-        'train_size': len(X_train),
-        'test_size': len(X_test)
-    }
-
-    return model, metrics
+    mdl.fit(X_train, y_train)
+    yp = mdl.predict_proba(X_test)[:, 1]
+    m = {'auc': round(roc_auc_score(y_test, yp), 4),
+         'brier': round(brier_score_loss(y_test, yp), 4),
+         'accuracy': round((mdl.predict(X_test) == y_test).mean(), 4),
+         'train_size': len(X_train), 'test_size': len(X_test)}
+    return mdl, m
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PROCESSING FUNCTIONS
+# HELPER FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
-def compute_weighted_nationality_risk(row, sh_nat_cols):
-    """Compute weighted nationality risk from shareholder nationality columns."""
-    risks = []
-    for col in sh_nat_cols:
-        nat = row.get(col)
-        if pd.notna(nat) and str(nat).strip():
-            risk = GEO_RISK.get(str(nat).strip())
-            if risk and risk in RISK_MAP:
-                risks.append(risk)
-    if not risks:
-        return 'Medium'
-    if 'Override' in risks:
-        return 'Override'
+def compute_weighted_risk(risk_list):
+    risks = [r for r in risk_list if r in RISK_MAP]
+    if not risks: return 'Medium'
+    if 'Override' in risks: return 'Override'
     avg = np.mean([RISK_MAP[r] for r in risks])
     if avg <= 1.5: return 'Low'
     elif avg <= 2.5: return 'Medium'
     else: return 'High'
 
 
-def process_upload(df_input):
-    """Process uploaded company data into model-ready features."""
-    result = pd.DataFrame()
+def derive_activity_features(activity_codes, act_ref):
+    """From a list of activity codes, derive model features using the reference table."""
+    if act_ref is None or not activity_codes:
+        return 0, 0, 'Medium', 'No'
 
-    result['Company Name'] = df_input['Company Name']
-    result['License Issue Date'] = pd.to_datetime(df_input['License Issue Date'])
-    result['License Expiry Date'] = pd.to_datetime(df_input['License Expiry Date'])
-    result['Total No of Activities'] = df_input['Total No of Activities'].fillna(1).astype(int)
-    result['No of Groups Opted'] = df_input['No of Groups Opted'].fillna(1).astype(int)
-    result['Visa Allocation'] = df_input['Visa Allocation'].fillna(0).astype(int)
-    result['Number of Shareholders'] = df_input['Number of Shareholders'].fillna(1).astype(int)
+    matched = act_ref[act_ref['Code'].isin(activity_codes)]
+    total_activities = len(matched) if len(matched) > 0 else len(activity_codes)
+    groups = matched['Group'].dropna().unique()
+    groups = [g for g in groups if g and g != 'nan']
+    no_groups = len(groups) if groups else 1
 
-    # Third-party approval
-    if 'Third-party Approval Required' in df_input.columns:
-        result['Third-party Approval Encoded'] = df_input['Third-party Approval Required'].map(APPROVAL_MAP).fillna(0).astype(int)
-    else:
-        result['Third-party Approval Encoded'] = 0
+    risk_list = matched['Risk Rating'].tolist()
+    weighted_risk = compute_weighted_risk(risk_list) if risk_list else 'Medium'
 
-    # Weighted Activity Risk
-    if 'Weighted Activity Risk' in df_input.columns:
-        result['Weighted Activity Risk Encoded'] = df_input['Weighted Activity Risk'].map(RISK_MAP).fillna(2).astype(int)
-    else:
-        result['Weighted Activity Risk Encoded'] = 2
+    third_party = 'No'
+    if 'Third Party' in matched.columns:
+        tp_vals = matched['Third Party'].dropna().tolist()
+        tp_vals = [t for t in tp_vals if t and t != 'nan' and t.strip() != '' and t.strip() != 'N/A']
+        if tp_vals:
+            third_party = 'Yes'
 
-    # Shareholder age columns
-    sh_age_cols = [c for c in df_input.columns if 'age' in c.lower() and 'shareholder' in c.lower()]
-    if sh_age_cols:
-        result['Average Shareholder Age'] = df_input[sh_age_cols].apply(
-            lambda row: round(row.dropna().mean(), 1) if row.dropna().any() else 42.8, axis=1)
-    else:
-        result['Average Shareholder Age'] = 42.8
-
-    # Shareholder nationality columns → weighted nationality risk
-    sh_nat_cols = [c for c in df_input.columns if 'nationality' in c.lower() and 'shareholder' in c.lower()]
-    if sh_nat_cols:
-        result['Weighted Nationality Risk Encoded'] = df_input.apply(
-            lambda row: RISK_MAP[compute_weighted_nationality_risk(row, sh_nat_cols)], axis=1)
-    else:
-        result['Weighted Nationality Risk Encoded'] = 2
-
-    # Year columns — find all Year/Y columns
-    year_cols = []
-    for i in range(1, 6):
-        candidates = [c for c in df_input.columns if
-                      c.strip().lower() in [f'year {i}', f'y{i}', f'year{i}',
-                                            f'y {i}', f'year {i} transactions']]
-        if candidates:
-            year_cols.append((i, candidates[0]))
-
-    # Determine renewal year from license issue date
-    result['Renewal Year'] = result['License Issue Date'].apply(
-        lambda d: max(1, int((REF_DATE - d).days / 365)) if pd.notna(d) else 1)
-    # Cap at 5
-    result['Renewal Year'] = result['Renewal Year'].clip(upper=5)
-
-    # Transaction features
-    for _, row_data in result.iterrows():
-        idx = row_data.name
-        ry = result.at[idx, 'Renewal Year']
-
-        # Build year values array
-        year_values = []
-        for yr_num, yr_col in year_cols:
-            val = df_input.at[idx, yr_col]
-            year_values.append(int(val) if pd.notna(val) else 0)
-
-        # Pad to 5 years
-        while len(year_values) < 5:
-            year_values.append(0)
-
-        # Latest year transactions (at the renewal year)
-        ry_idx = min(ry, len(year_values)) - 1
-        result.at[idx, 'Latest Year Transactions'] = year_values[ry_idx]
-
-        # Cumulative
-        cum = sum(year_values[:ry])
-        result.at[idx, 'Cumulative Transactions'] = cum
-
-        # Trend
-        if ry <= 1:
-            result.at[idx, 'Transaction Trend'] = 0
-        else:
-            prev_idx = ry - 2
-            result.at[idx, 'Transaction Trend'] = year_values[ry_idx] - year_values[prev_idx]
-
-    # Ensure numeric
-    for col in ['Latest Year Transactions', 'Cumulative Transactions', 'Transaction Trend']:
-        result[col] = pd.to_numeric(result[col], errors='coerce').fillna(0).astype(int)
-
-    # Engineered features
-    result['Zero Transactions Flag'] = (result['Latest Year Transactions'] == 0).astype(int)
-    result['Log Latest Transactions'] = np.log1p(result['Latest Year Transactions'])
-    result['Log Cumulative Transactions'] = np.log1p(result['Cumulative Transactions'])
-    result['Engagement Ratio'] = np.where(
-        result['Cumulative Transactions'] > 0,
-        result['Latest Year Transactions'] / result['Cumulative Transactions'], 0)
-    result['Transactions per Visa'] = np.where(
-        result['Visa Allocation'] > 0,
-        result['Latest Year Transactions'] / result['Visa Allocation'],
-        result['Latest Year Transactions'])
-    result['Combined Risk Score'] = (
-        result['Weighted Activity Risk Encoded'] + result['Weighted Nationality Risk Encoded'])
-
-    return result
+    return total_activities, no_groups, weighted_risk, third_party
 
 
-def risk_category(prob):
-    if prob < 0.4: return 'High Risk'
-    elif prob < 0.6: return 'Medium Risk'
-    elif prob < 0.8: return 'Low Risk'
+def parse_activity_string(activity_str, act_ref):
+    """Parse comma-separated activity string like '4690.97 - General Trading ,6420.00 - Holding companies'"""
+    if pd.isna(activity_str) or not str(activity_str).strip():
+        return []
+    parts = str(activity_str).split(',')
+    codes = []
+    for p in parts:
+        p = p.strip()
+        if ' - ' in p:
+            code = p.split(' - ')[0].strip()
+            codes.append(code)
+        elif p:
+            codes.append(p.strip())
+    return codes
+
+
+def add_engineered(df):
+    df['Zero Transactions Flag'] = (df['Latest Year Transactions'] == 0).astype(int)
+    df['Log Latest Transactions'] = np.log1p(df['Latest Year Transactions'])
+    df['Log Cumulative Transactions'] = np.log1p(df['Cumulative Transactions'])
+    df['Engagement Ratio'] = np.where(df['Cumulative Transactions'] > 0,
+        df['Latest Year Transactions'] / df['Cumulative Transactions'], 0)
+    df['Transactions per Visa'] = np.where(df['Visa Allocation'] > 0,
+        df['Latest Year Transactions'] / df['Visa Allocation'], df['Latest Year Transactions'])
+    df['Combined Risk Score'] = df['Weighted Activity Risk Encoded'] + df['Weighted Nationality Risk Encoded']
+    return df
+
+
+def risk_category(p):
+    if p < 0.4: return 'High Risk'
+    elif p < 0.6: return 'Medium Risk'
+    elif p < 0.8: return 'Low Risk'
     else: return 'Very Low Risk'
 
+def risk_emoji(c):
+    return {'High Risk': '🔴', 'Medium Risk': '🟡', 'Low Risk': '🟢', 'Very Low Risk': '🔵'}.get(c, '⚪')
 
-def risk_color(cat):
-    return {
-        'High Risk': '#E74C3C',
-        'Medium Risk': '#F39C12',
-        'Low Risk': '#27AE60',
-        'Very Low Risk': '#2E86AB'
-    }.get(cat, '#888888')
+def risk_color(c):
+    return {'High Risk': '#E74C3C', 'Medium Risk': '#F39C12', 'Low Risk': '#27AE60', 'Very Low Risk': '#2E86AB'}.get(c, '#888')
 
 
-def create_template():
-    """Create a downloadable Excel template."""
-    template_data = {
-        'Company Name': ['ABC Trading LLC', 'XYZ Holdings'],
-        'License Issue Date': ['2024-01-15', '2023-06-20'],
-        'License Expiry Date': ['2025-01-14', '2024-06-19'],
-        'Total No of Activities': [3, 5],
-        'No of Groups Opted': [2, 3],
-        'Weighted Activity Risk': ['Medium', 'High'],
-        'Visa Allocation': [2, 4],
-        'Third-party Approval Required': ['No', 'Yes'],
-        'Number of Shareholders': [2, 1],
-        'Shareholder 1 Age': [35, 42],
-        'Shareholder 1 Nationality': ['India', 'United Kingdom'],
-        'Shareholder 2 Age': [40, None],
-        'Shareholder 2 Nationality': ['Egypt', None],
-        'Shareholder 3 Age': [None, None],
-        'Shareholder 3 Nationality': [None, None],
-        'Year 1': [5, 8],
-        'Year 2': [3, 6],
-        'Year 3': [0, 4],
-        'Year 4': [0, 0],
-        'Year 5': [0, 0],
-    }
-    return pd.DataFrame(template_data)
+def process_manual(d, act_ref, geo_risk):
+    """Process manual input into model-ready row."""
+    # Activity-derived features
+    total_act, no_groups, w_act_risk, third_party = derive_activity_features(d['activity_codes'], act_ref)
+
+    # Shareholder features
+    ages = [s['age'] for s in d['shareholders'] if s['age'] > 0]
+    nats = [s['nationality'] for s in d['shareholders']]
+    nat_risks = [geo_risk.get(n, 'Medium') for n in nats if n]
+    w_nat_risk = compute_weighted_risk(nat_risks)
+
+    # Renewal year
+    ry = max(1, min(5, int((REF_DATE - pd.Timestamp(d['issue_date'])).days / 365)))
+
+    # Transactions
+    yv = d['year_transactions'] + [0] * (5 - len(d['year_transactions']))
+    ri = ry - 1
+    lt = yv[ri]; cum = sum(yv[:ry])
+    trend = 0 if ry <= 1 else yv[ri] - yv[ri - 1]
+
+    row = pd.DataFrame([{
+        'Company Name': d['company_name'],
+        'License Issue Date': d['issue_date'],
+        'License Expiry Date': d['expiry_date'],
+        'Total No of Activities': total_act,
+        'No of Groups Opted': no_groups,
+        'Visa Allocation': d['visa_allocation'],
+        'Number of Shareholders': d['num_shareholders'],
+        'Third-party Approval Encoded': APPROVAL_MAP.get(third_party, 0),
+        'Weighted Activity Risk Encoded': RISK_MAP.get(w_act_risk, 2),
+        'Average Shareholder Age': round(np.mean(ages), 1) if ages else 42.8,
+        'Weighted Nationality Risk Encoded': RISK_MAP.get(w_nat_risk, 2),
+        'Renewal Year': ry, 'Latest Year Transactions': lt,
+        'Cumulative Transactions': cum, 'Transaction Trend': trend,
+        '_w_act_risk_label': w_act_risk, '_w_nat_risk_label': w_nat_risk,
+        '_third_party': third_party}])
+    return add_engineered(row)
+
+
+def process_upload(df_in, act_ref, geo_risk):
+    """Process bulk upload into model-ready DataFrame."""
+    r = pd.DataFrame()
+    r['Company Name'] = df_in['Company Name']
+    r['License Issue Date'] = pd.to_datetime(df_in['License Issue Date'])
+    r['License Expiry Date'] = pd.to_datetime(df_in.get('License Expiry Date', pd.NaT))
+
+    # If Business Activity column exists, parse it to derive activity features
+    if 'Business Activity' in df_in.columns and act_ref is not None:
+        act_features = df_in['Business Activity'].apply(lambda x: derive_activity_features(
+            parse_activity_string(x, act_ref), act_ref))
+        r['Total No of Activities'] = act_features.apply(lambda x: x[0])
+        r['No of Groups Opted'] = act_features.apply(lambda x: x[1])
+        r['Weighted Activity Risk Encoded'] = act_features.apply(lambda x: RISK_MAP.get(x[2], 2))
+        r['Third-party Approval Encoded'] = act_features.apply(lambda x: APPROVAL_MAP.get(x[3], 0))
+    else:
+        r['Total No of Activities'] = df_in.get('Total No of Activities', pd.Series([1]*len(df_in))).fillna(1).astype(int)
+        r['No of Groups Opted'] = df_in.get('No of Groups Opted', pd.Series([1]*len(df_in))).fillna(1).astype(int)
+        if 'Weighted Activity Risk' in df_in.columns:
+            r['Weighted Activity Risk Encoded'] = df_in['Weighted Activity Risk'].map(RISK_MAP).fillna(2).astype(int)
+        else:
+            r['Weighted Activity Risk Encoded'] = 2
+        if 'Third-party Approval Required' in df_in.columns:
+            r['Third-party Approval Encoded'] = df_in['Third-party Approval Required'].map(APPROVAL_MAP).fillna(0).astype(int)
+        else:
+            r['Third-party Approval Encoded'] = 0
+
+    r['Visa Allocation'] = df_in.get('Visa Allocation', pd.Series([0]*len(df_in))).fillna(0).astype(int)
+    r['Number of Shareholders'] = df_in.get('Number of Shareholders', pd.Series([1]*len(df_in))).fillna(1).astype(int)
+
+    # Shareholder age
+    sac = [c for c in df_in.columns if 'age' in c.lower() and 'shareholder' in c.lower()]
+    r['Average Shareholder Age'] = df_in[sac].apply(
+        lambda x: round(x.dropna().mean(), 1) if x.dropna().any() else 42.8, axis=1) if sac else 42.8
+
+    # Nationality risk
+    snc = [c for c in df_in.columns if 'nationality' in c.lower() and 'shareholder' in c.lower()]
+    if snc and geo_risk:
+        r['Weighted Nationality Risk Encoded'] = df_in.apply(
+            lambda row: RISK_MAP[compute_weighted_risk(
+                [geo_risk.get(str(row.get(c, '')).strip(), 'Medium') for c in snc
+                 if pd.notna(row.get(c)) and str(row.get(c)).strip()])], axis=1)
+    else:
+        r['Weighted Nationality Risk Encoded'] = 2
+
+    # Year columns
+    yc = []
+    for i in range(1, 6):
+        cands = [c for c in df_in.columns if c.strip().lower() in
+                 [f'year {i}', f'y{i}', f'year{i}', f'y {i}', f'year {i} transactions']]
+        if cands: yc.append((i, cands[0]))
+
+    r['Renewal Year'] = r['License Issue Date'].apply(
+        lambda d: max(1, min(5, int((REF_DATE - d).days / 365))) if pd.notna(d) else 1)
+
+    for _, rd in r.iterrows():
+        idx = rd.name; ry = r.at[idx, 'Renewal Year']
+        yv = [int(df_in.at[idx, c]) if pd.notna(df_in.at[idx, c]) else 0 for _, c in yc]
+        yv += [0] * (5 - len(yv)); ri = min(ry, len(yv)) - 1
+        r.at[idx, 'Latest Year Transactions'] = yv[ri]
+        r.at[idx, 'Cumulative Transactions'] = sum(yv[:ry])
+        r.at[idx, 'Transaction Trend'] = 0 if ry <= 1 else yv[ri] - yv[ri - 1]
+
+    for c in ['Latest Year Transactions', 'Cumulative Transactions', 'Transaction Trend']:
+        r[c] = pd.to_numeric(r[c], errors='coerce').fillna(0).astype(int)
+    return add_engineered(r)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STREAMLIT APP
+# APP
 # ══════════════════════════════════════════════════════════════════════════════
-st.set_page_config(
-    page_title="B2C Renewal Predictor",
-    page_icon="🔄",
-    layout="wide"
-)
+st.set_page_config(page_title="B2C Renewal Predictor", page_icon="🔄", layout="wide")
+st.markdown("""<style>
+.main-header{font-size:2.2rem;font-weight:700;color:#1F4E79;margin-bottom:0}
+.sub-header{font-size:1rem;color:#666;margin-top:0;margin-bottom:2rem}
+.metric-card{background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:1.2rem;text-align:center}
+.metric-value{font-size:1.8rem;font-weight:700;color:#1F4E79}
+.metric-label{font-size:.85rem;color:#666;margin-top:.3rem}
+.risk-high{color:#E74C3C;font-weight:700}.risk-medium{color:#F39C12;font-weight:700}
+.risk-low{color:#27AE60;font-weight:700}.risk-vlow{color:#2E86AB;font-weight:700}
+.result-box{padding:2rem;border-radius:12px;text-align:center;margin:1rem 0}
+.score-big{font-size:4rem;font-weight:800;line-height:1}
+.score-label{font-size:1.2rem;font-weight:600;margin-top:.5rem}
+.factor-card{background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:.8rem 1rem;margin:.3rem 0}
+.factor-title{font-size:.8rem;color:#888}.factor-value{font-size:1.1rem;font-weight:600;color:#1F4E79}
+.derived-box{background:#EBF5FB;border:1px solid #2E86AB;border-radius:8px;padding:1rem;margin:.5rem 0}
+</style>""", unsafe_allow_html=True)
 
-# Custom CSS
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #1F4E79;
-        margin-bottom: 0;
-    }
-    .sub-header {
-        font-size: 1rem;
-        color: #666;
-        margin-top: 0;
-        margin-bottom: 2rem;
-    }
-    .metric-card {
-        background: #F8FAFC;
-        border: 1px solid #E2E8F0;
-        border-radius: 8px;
-        padding: 1.2rem;
-        text-align: center;
-    }
-    .metric-value {
-        font-size: 1.8rem;
-        font-weight: 700;
-        color: #1F4E79;
-    }
-    .metric-label {
-        font-size: 0.85rem;
-        color: #666;
-        margin-top: 0.3rem;
-    }
-    .risk-high { color: #E74C3C; font-weight: 700; }
-    .risk-medium { color: #F39C12; font-weight: 700; }
-    .risk-low { color: #27AE60; font-weight: 700; }
-    .risk-vlow { color: #2E86AB; font-weight: 700; }
-    .stDataFrame { font-size: 0.85rem; }
-</style>
-""", unsafe_allow_html=True)
-
-# Header
 st.markdown('<p class="main-header">B2C License Renewal Predictor</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Meydan Free Zone — Upload company data to get renewal probability scores</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">Meydan Free Zone — Enter company details or upload in bulk to get renewal scores</p>', unsafe_allow_html=True)
 
-# Load model
+# Load everything
 model, metrics = train_model()
+act_ref = load_activity_reference()
+geo_risk = load_geo_risk()
 
-if model is None:
-    st.error(f"Training data file not found: **{TRAINING_DATA}**. "
-             f"Place the file in the same directory as this script and restart.")
+# Validation
+missing_files = []
+if model is None: missing_files.append(TRAINING_DATA)
+if act_ref is None: missing_files.append(ACTIVITY_FILE)
+if geo_risk is None: missing_files.append(GEO_RISK_FILE)
+if missing_files:
+    st.error(f"Missing files: **{', '.join(missing_files)}**. Place them in the same directory as app.py.")
     st.stop()
 
-# Sidebar — Model Info
+NATIONALITY_LIST = sorted(geo_risk.keys())
+
+# Sidebar
 with st.sidebar:
     st.markdown("### Model Performance")
     st.metric("AUC-ROC", f"{metrics['auc']:.3f}")
@@ -389,220 +362,246 @@ with st.sidebar:
     st.metric("Accuracy", f"{metrics['accuracy']:.1%}")
     st.divider()
     st.markdown(f"**Training:** {metrics['train_size']:,} rows")
-    st.markdown(f"**Test:** {metrics['test_size']:,} rows")
-    st.markdown(f"**Model:** Gradient Boosting")
-    st.markdown(f"**Features:** {len(FEATURE_COLS)}")
+    st.markdown(f"**Activities loaded:** {len(act_ref):,}")
+    st.markdown(f"**Countries loaded:** {len(geo_risk):,}")
     st.divider()
     st.markdown("### Risk Thresholds")
     st.markdown("- 🔴 **High Risk:** < 40%")
-    st.markdown("- 🟡 **Medium Risk:** 40–60%")
-    st.markdown("- 🟢 **Low Risk:** 60–80%")
+    st.markdown("- 🟡 **Medium Risk:** 40\u201360%")
+    st.markdown("- 🟢 **Low Risk:** 60\u201380%")
     st.markdown("- 🔵 **Very Low Risk:** > 80%")
 
-# Main content
-tab1, tab2 = st.tabs(["📊 Score Companies", "📋 Template & Instructions"])
+tab1, tab2, tab3 = st.tabs(["\u270D\uFE0F Manual Input", "\U0001F4CA Bulk Upload", "\U0001F4CB Guide"])
 
-# ── TAB 2: Template ──
-with tab2:
-    st.markdown("### Input File Template")
-    st.markdown("Download the template, fill in your company data, and upload it in the scoring tab.")
-
-    template_df = create_template()
-    st.dataframe(template_df, use_container_width=True, hide_index=True)
-
-    buffer = io.BytesIO()
-    template_df.to_excel(buffer, index=False, sheet_name='Companies')
-    buffer.seek(0)
-
-    st.download_button(
-        label="Download Template (.xlsx)",
-        data=buffer,
-        file_name="B2C_Renewal_Prediction_Template.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-    st.markdown("### Column Guide")
-    st.markdown("""
-    | Column | Required | Format | Notes |
-    |--------|----------|--------|-------|
-    | Company Name | Yes | Text | For identification only, not used in model |
-    | License Issue Date | Yes | Date | When the license was first issued |
-    | License Expiry Date | Yes | Date | Current expiry date |
-    | Total No of Activities | Yes | Integer | Number of business activities registered |
-    | No of Groups Opted | Yes | Integer | Number of activity groups |
-    | Weighted Activity Risk | Yes | Low / Medium / High / Override | Pre-calculated weighted risk |
-    | Visa Allocation | Yes | Integer | Number of visas allocated (0 if none) |
-    | Third-party Approval Required | No | Yes / No | Defaults to No if missing |
-    | Number of Shareholders | Yes | Integer | Total shareholder count |
-    | Shareholder N Age | Yes | Number | Age of Nth shareholder (add columns as needed) |
-    | Shareholder N Nationality | Yes | Text | Country name matching the geo risk list |
-    | Year 1, Year 2, ... | Yes | Integer | Transaction count per year (0 if none) |
-    """)
-
-    st.markdown("### Supported Nationalities")
-    with st.expander("View all 165+ supported nationalities"):
-        nat_df = pd.DataFrame({
-            'Country': list(GEO_RISK.keys()),
-            'Risk Rating': list(GEO_RISK.values())
-        }).sort_values('Country')
-        st.dataframe(nat_df, use_container_width=True, hide_index=True, height=400)
-
-# ── TAB 1: Scoring ──
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — MANUAL INPUT
+# ══════════════════════════════════════════════════════════════════════════════
 with tab1:
-    uploaded_file = st.file_uploader(
-        "Upload company data (.xlsx)",
-        type=['xlsx'],
-        help="Use the template from the instructions tab"
+    st.markdown("### Company Details")
+    ca, cb = st.columns(2)
+    with ca:
+        company_name = st.text_input("Company Name", placeholder="e.g. ABC Trading LLC")
+        issue_date = st.date_input("License Issue Date", value=pd.Timestamp('2024-01-01'))
+        expiry_date = st.date_input("License Expiry Date", value=pd.Timestamp('2025-12-31'))
+        visa_allocation = st.number_input("Visa Allocation", min_value=0, max_value=600, value=2)
+    with cb:
+        num_shareholders = st.number_input("Number of Shareholders", min_value=1, max_value=11, value=1)
+
+        # Year transactions in a compact layout
+        st.markdown("**Yearly Transactions**")
+        yr_cols_input = st.columns(5)
+        year_txns = []
+        for i, yc in enumerate(yr_cols_input):
+            with yc:
+                v = st.number_input(f"Y{i+1}", min_value=0, max_value=500, value=0, key=f"yr_{i}")
+                year_txns.append(v)
+
+    # ── Activities Selection ──
+    st.markdown("---")
+    st.markdown("### Business Activities")
+    st.caption("Search and select activities. The app will auto-calculate risk, groups, and third-party approval.")
+
+    # Build searchable list
+    activity_options = act_ref['display'].tolist()
+    selected_activities = st.multiselect(
+        "Select Activities (search by code or name)",
+        options=activity_options,
+        default=None,
+        placeholder="Type to search... e.g. 'General Trading' or '4690'"
     )
 
-    if uploaded_file is not None:
+    # Derive features from selected activities
+    selected_codes = [a.split(' - ')[0].strip() for a in selected_activities]
+    total_act, no_groups, w_act_risk, third_party = derive_activity_features(selected_codes, act_ref)
+
+    if selected_activities:
+        st.markdown(f"""<div class="derived-box">
+            <strong>Auto-derived from selected activities:</strong><br>
+            Total Activities: <strong>{total_act}</strong> &nbsp;|&nbsp;
+            Groups Opted: <strong>{no_groups}</strong> &nbsp;|&nbsp;
+            Weighted Activity Risk: <strong>{w_act_risk}</strong> &nbsp;|&nbsp;
+            Third-party Approval: <strong>{third_party}</strong>
+        </div>""", unsafe_allow_html=True)
+
+    # ── Shareholders ──
+    st.markdown("---")
+    st.markdown("### Shareholder Details")
+    shareholders = []
+    for row_start in range(0, num_shareholders, 4):
+        row_end = min(row_start + 4, num_shareholders)
+        cols = st.columns(row_end - row_start)
+        for i, col in zip(range(row_start, row_end), cols):
+            with col:
+                st.markdown(f"**Shareholder {i+1}**")
+                age = st.number_input("Age", min_value=18, max_value=100, value=35, key=f"sh_age_{i}")
+                nationality = st.selectbox("Nationality", NATIONALITY_LIST,
+                    index=NATIONALITY_LIST.index('United Arab Emirates'), key=f"sh_nat_{i}")
+                shareholders.append({'age': age, 'nationality': nationality})
+
+    # ── Score ──
+    st.markdown("---")
+    if st.button("\U0001F50D Calculate Renewal Score", type="primary", use_container_width=True):
+        if not company_name.strip():
+            st.warning("Please enter a company name.")
+        elif not selected_activities:
+            st.warning("Please select at least one business activity.")
+        else:
+            data = {'company_name': company_name, 'issue_date': issue_date, 'expiry_date': expiry_date,
+                    'visa_allocation': visa_allocation, 'num_shareholders': num_shareholders,
+                    'activity_codes': selected_codes, 'shareholders': shareholders,
+                    'year_transactions': year_txns}
+
+            processed = process_manual(data, act_ref, geo_risk)
+            prob = model.predict_proba(processed[FEATURE_COLS])[0, 1]
+            risk = risk_category(prob)
+            emoji = risk_emoji(risk)
+            color = risk_color(risk)
+
+            st.markdown("---")
+            rc1, rc2 = st.columns([1, 2])
+            with rc1:
+                st.markdown(f"""<div class="result-box" style="background:{color}15;border:2px solid {color};">
+                    <div style="font-size:1rem;color:#666;">Renewal Probability</div>
+                    <div class="score-big" style="color:{color};">{prob:.1%}</div>
+                    <div class="score-label" style="color:{color};">{emoji} {risk}</div>
+                </div>""", unsafe_allow_html=True)
+                st.markdown(f"""<div class="result-box" style="background:#F8FAFC;border:1px solid #E2E8F0;">
+                    <div style="font-size:.9rem;color:#666;">Company</div>
+                    <div style="font-size:1.3rem;font-weight:700;color:#1F4E79;">{company_name}</div>
+                </div>""", unsafe_allow_html=True)
+
+            with rc2:
+                st.markdown("**Key Factors**")
+                vals = processed.iloc[0]
+                f1, f2, f3 = st.columns(3)
+                with f1:
+                    st.markdown(f'<div class="factor-card"><div class="factor-title">Renewal Year</div><div class="factor-value">{int(vals["Renewal Year"])}</div></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="factor-card"><div class="factor-title">Latest Year Txns</div><div class="factor-value">{int(vals["Latest Year Transactions"])}</div></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="factor-card"><div class="factor-title">Cumulative Txns</div><div class="factor-value">{int(vals["Cumulative Transactions"])}</div></div>', unsafe_allow_html=True)
+                with f2:
+                    st.markdown(f'<div class="factor-card"><div class="factor-title">Engagement Ratio</div><div class="factor-value">{vals["Engagement Ratio"]:.2f}</div></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="factor-card"><div class="factor-title">Txns per Visa</div><div class="factor-value">{vals["Transactions per Visa"]:.1f}</div></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="factor-card"><div class="factor-title">Trend</div><div class="factor-value">{int(vals["Transaction Trend"]):+d}</div></div>', unsafe_allow_html=True)
+                with f3:
+                    st.markdown(f'<div class="factor-card"><div class="factor-title">Activity Risk</div><div class="factor-value">{vals.get("_w_act_risk_label", w_act_risk)}</div></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="factor-card"><div class="factor-title">Nationality Risk</div><div class="factor-value">{vals.get("_w_nat_risk_label", RISK_LABEL.get(int(vals["Weighted Nationality Risk Encoded"]), "Medium"))}</div></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="factor-card"><div class="factor-title">Zero Transactions</div><div class="factor-value">{"Yes" if vals["Zero Transactions Flag"]==1 else "No"}</div></div>', unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — BULK UPLOAD
+# ══════════════════════════════════════════════════════════════════════════════
+with tab2:
+    st.markdown("### Upload Company Data")
+    st.caption("If your file has a 'Business Activity' column with comma-separated codes (e.g. '4690.97 - General Trading, 6420.00 - Holding companies'), the app will auto-derive activity risk, groups, and third-party approval.")
+
+    uploaded = st.file_uploader("Upload Excel (.xlsx)", type=['xlsx'], help="See the Guide tab for format")
+    if uploaded is not None:
         try:
-            df_input = pd.read_excel(uploaded_file)
-            st.success(f"Loaded {len(df_input)} companies")
+            df_in = pd.read_excel(uploaded)
+            st.success(f"Loaded {len(df_in)} companies")
 
-            # Validate required columns
-            required = ['Company Name', 'License Issue Date', 'Total No of Activities',
-                        'No of Groups Opted', 'Visa Allocation', 'Number of Shareholders']
-            missing = [c for c in required if c not in df_input.columns]
+            required = ['Company Name', 'License Issue Date']
+            missing = [c for c in required if c not in df_in.columns]
             if missing:
-                st.error(f"Missing required columns: {', '.join(missing)}")
-                st.stop()
+                st.error(f"Missing columns: {', '.join(missing)}"); st.stop()
 
-            # Check for year columns
-            year_cols_found = [c for c in df_input.columns if
-                               any(c.strip().lower() in [f'year {i}', f'y{i}', f'year{i}', f'y {i}']
-                                   for i in range(1, 6))]
-            if not year_cols_found:
-                st.error("No Year/Transaction columns found. Expected: Year 1, Year 2, ... or Y1, Y2, ...")
-                st.stop()
+            ycf = [c for c in df_in.columns if any(c.strip().lower() in
+                   [f'year {i}', f'y{i}', f'year{i}'] for i in range(1, 6))]
+            if not ycf:
+                st.error("No Year columns found."); st.stop()
 
-            # Process
-            with st.spinner("Processing and scoring companies..."):
-                processed = process_upload(df_input)
-
-                # Score
-                X_score = processed[FEATURE_COLS]
-                processed['Renewal Probability'] = model.predict_proba(X_score)[:, 1]
-                processed['Renewal Probability'] = processed['Renewal Probability'].round(4)
-                processed['Risk Category'] = processed['Renewal Probability'].apply(risk_category)
-
-            # ── Summary metrics ──
-            st.markdown("---")
-            col1, col2, col3, col4, col5 = st.columns(5)
-            with col1:
-                st.markdown(f"""<div class="metric-card">
-                    <div class="metric-value">{len(processed)}</div>
-                    <div class="metric-label">Companies Scored</div>
-                </div>""", unsafe_allow_html=True)
-            with col2:
-                high_risk = (processed['Risk Category'] == 'High Risk').sum()
-                st.markdown(f"""<div class="metric-card">
-                    <div class="metric-value risk-high">{high_risk}</div>
-                    <div class="metric-label">High Risk</div>
-                </div>""", unsafe_allow_html=True)
-            with col3:
-                med_risk = (processed['Risk Category'] == 'Medium Risk').sum()
-                st.markdown(f"""<div class="metric-card">
-                    <div class="metric-value risk-medium">{med_risk}</div>
-                    <div class="metric-label">Medium Risk</div>
-                </div>""", unsafe_allow_html=True)
-            with col4:
-                low_risk = (processed['Risk Category'] == 'Low Risk').sum()
-                st.markdown(f"""<div class="metric-card">
-                    <div class="metric-value risk-low">{low_risk}</div>
-                    <div class="metric-label">Low Risk</div>
-                </div>""", unsafe_allow_html=True)
-            with col5:
-                vlow_risk = (processed['Risk Category'] == 'Very Low Risk').sum()
-                st.markdown(f"""<div class="metric-card">
-                    <div class="metric-value risk-vlow">{vlow_risk}</div>
-                    <div class="metric-label">Very Low Risk</div>
-                </div>""", unsafe_allow_html=True)
+            with st.spinner("Scoring..."):
+                proc = process_upload(df_in, act_ref, geo_risk)
+                proc['Renewal Probability'] = model.predict_proba(proc[FEATURE_COLS])[:, 1].round(4)
+                proc['Risk Category'] = proc['Renewal Probability'].apply(risk_category)
 
             st.markdown("---")
+            cs = st.columns(5)
+            cnts = {'t': len(proc),
+                    'h': (proc['Risk Category'] == 'High Risk').sum(),
+                    'm': (proc['Risk Category'] == 'Medium Risk').sum(),
+                    'l': (proc['Risk Category'] == 'Low Risk').sum(),
+                    'v': (proc['Risk Category'] == 'Very Low Risk').sum()}
+            labels = [('t', 'Companies', 'metric-value'), ('h', 'High Risk', 'metric-value risk-high'),
+                      ('m', 'Medium Risk', 'metric-value risk-medium'), ('l', 'Low Risk', 'metric-value risk-low'),
+                      ('v', 'Very Low Risk', 'metric-value risk-vlow')]
+            for col, (k, lbl, cls) in zip(cs, labels):
+                with col:
+                    st.markdown(f'<div class="metric-card"><div class="{cls}">{cnts[k]}</div><div class="metric-label">{lbl}</div></div>', unsafe_allow_html=True)
 
-            # ── Results table ──
-            display_cols = ['Company Name', 'Renewal Probability', 'Risk Category',
-                            'Renewal Year', 'Latest Year Transactions',
-                            'Cumulative Transactions', 'Transaction Trend',
-                            'Average Shareholder Age', 'Visa Allocation',
-                            'Zero Transactions Flag']
-
-            display_df = processed[display_cols].sort_values(
+            st.markdown("---")
+            display_cols = ['Company Name', 'Renewal Probability', 'Risk Category', 'Renewal Year',
+                            'Latest Year Transactions', 'Cumulative Transactions', 'Transaction Trend',
+                            'Average Shareholder Age', 'Visa Allocation', 'Zero Transactions Flag']
+            display_df = proc[[c for c in display_cols if c in proc.columns]].sort_values(
                 'Renewal Probability', ascending=True).reset_index(drop=True)
 
             st.markdown("### Scored Companies")
-            st.markdown("Sorted by renewal probability (highest risk first)")
 
-            # Color-code the risk category
             def highlight_risk(val):
-                colors = {
-                    'High Risk': 'background-color: #FDEDEC; color: #E74C3C; font-weight: bold',
-                    'Medium Risk': 'background-color: #FEF9E7; color: #F39C12; font-weight: bold',
-                    'Low Risk': 'background-color: #EAFAF1; color: #27AE60; font-weight: bold',
-                    'Very Low Risk': 'background-color: #EBF5FB; color: #2E86AB; font-weight: bold'
-                }
-                return colors.get(val, '')
+                return {'High Risk': 'background-color:#FDEDEC;color:#E74C3C;font-weight:bold',
+                        'Medium Risk': 'background-color:#FEF9E7;color:#F39C12;font-weight:bold',
+                        'Low Risk': 'background-color:#EAFAF1;color:#27AE60;font-weight:bold',
+                        'Very Low Risk': 'background-color:#EBF5FB;color:#2E86AB;font-weight:bold'}.get(val, '')
 
-            styled = display_df.style.applymap(
-                highlight_risk, subset=['Risk Category']
-            ).format({'Renewal Probability': '{:.1%}'})
-
+            styled = display_df.style.applymap(highlight_risk, subset=['Risk Category']).format(
+                {'Renewal Probability': '{:.1%}'})
             st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
 
-            # ── Risk distribution chart ──
-            st.markdown("### Risk Distribution")
-            col_chart, col_stats = st.columns([2, 1])
-
-            with col_chart:
-                risk_counts = processed['Risk Category'].value_counts()
-                risk_order = ['High Risk', 'Medium Risk', 'Low Risk', 'Very Low Risk']
-                risk_counts = risk_counts.reindex(risk_order, fill_value=0)
-
-                chart_df = pd.DataFrame({
-                    'Risk Category': risk_counts.index,
-                    'Count': risk_counts.values
-                })
-                st.bar_chart(chart_df.set_index('Risk Category'), height=300)
-
-            with col_stats:
-                st.markdown("**Renewal Probability Statistics**")
-                stats = processed['Renewal Probability'].describe()
-                st.markdown(f"""
-                - **Mean:** {stats['mean']:.1%}
-                - **Median:** {stats['50%']:.1%}
-                - **Std Dev:** {stats['std']:.1%}
-                - **Min:** {stats['min']:.1%}
-                - **Max:** {stats['max']:.1%}
-                """)
-
-            # ── Download results ──
             st.markdown("---")
-
-            output_df = processed[['Company Name', 'License Issue Date', 'License Expiry Date',
-                                    'Renewal Year', 'Visa Allocation', 'Total No of Activities',
-                                    'No of Groups Opted', 'Number of Shareholders',
-                                    'Average Shareholder Age',
-                                    'Latest Year Transactions', 'Cumulative Transactions',
-                                    'Transaction Trend', 'Engagement Ratio', 'Transactions per Visa',
-                                    'Zero Transactions Flag',
-                                    'Renewal Probability', 'Risk Category']].copy()
-            output_df = output_df.sort_values('Renewal Probability', ascending=True).reset_index(drop=True)
-
-            out_buffer = io.BytesIO()
-            output_df.to_excel(out_buffer, index=False, sheet_name='Renewal Scores')
-            out_buffer.seek(0)
-
-            st.download_button(
-                label="Download Scored Results (.xlsx)",
-                data=out_buffer,
-                file_name="B2C_Renewal_Scores.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
-
+            out_cols = [c for c in ['Company Name', 'License Issue Date', 'License Expiry Date',
+                        'Renewal Year', 'Visa Allocation', 'Total No of Activities', 'No of Groups Opted',
+                        'Number of Shareholders', 'Average Shareholder Age',
+                        'Latest Year Transactions', 'Cumulative Transactions', 'Transaction Trend',
+                        'Engagement Ratio', 'Transactions per Visa', 'Zero Transactions Flag',
+                        'Renewal Probability', 'Risk Category'] if c in proc.columns]
+            output_df = proc[out_cols].sort_values('Renewal Probability').reset_index(drop=True)
+            buf = io.BytesIO()
+            output_df.to_excel(buf, index=False, sheet_name='Renewal Scores')
+            buf.seek(0)
+            st.download_button("Download Scored Results (.xlsx)", data=buf,
+                              file_name="B2C_Renewal_Scores.xlsx",
+                              mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                              type="primary")
         except Exception as e:
-            st.error(f"Error processing file: {str(e)}")
+            st.error(f"Error: {str(e)}")
             st.exception(e)
     else:
-        st.info("Upload an Excel file to get started. Download the template from the instructions tab.")
+        st.info("Upload an Excel file to score multiple companies at once.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — GUIDE
+# ══════════════════════════════════════════════════════════════════════════════
+with tab3:
+    st.markdown("### Manual Input")
+    st.markdown("Select business activities from the searchable dropdown. The app auto-derives Total Activities, Groups Opted, Weighted Activity Risk, and Third-party Approval from the activity reference table.")
+
+    st.markdown("### Bulk Upload Format")
+    st.markdown("""
+    Your Excel file should include these columns:
+
+    | Column | Required | Notes |
+    |--------|----------|-------|
+    | Company Name | Yes | Identifier |
+    | License Issue Date | Yes | Date |
+    | License Expiry Date | Optional | Date |
+    | Business Activity | Optional | Comma-separated: `4690.97 - General Trading, 6420.00 - Holding companies` |
+    | Visa Allocation | Optional | Integer, defaults to 0 |
+    | Number of Shareholders | Optional | Integer, defaults to 1 |
+    | Shareholder 1 Age | Optional | Years |
+    | Shareholder 1 Nationality | Optional | Country name |
+    | Shareholder 2 Age, ... | Optional | Add as needed |
+    | Year 1, Year 2, ... | Yes | Transaction counts |
+
+    If **Business Activity** is provided, the app auto-derives activity risk, groups, and third-party approval. Otherwise, you can include `Weighted Activity Risk`, `Total No of Activities`, `No of Groups Opted`, and `Third-party Approval Required` columns directly.
+    """)
+
+    st.markdown("### Activity Reference")
+    with st.expander(f"View all {len(act_ref)} activities"):
+        display_act = act_ref[['Code', 'Activity Name', 'Category', 'Group', 'Risk Rating']].copy()
+        st.dataframe(display_act, use_container_width=True, hide_index=True, height=400)
+
+    st.markdown("### Nationality Risk Ratings")
+    with st.expander(f"View all {len(geo_risk)} countries"):
+        nat_df = pd.DataFrame({'Country': list(geo_risk.keys()), 'Risk': list(geo_risk.values())}).sort_values('Country')
+        st.dataframe(nat_df, use_container_width=True, hide_index=True, height=400)
