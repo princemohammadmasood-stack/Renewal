@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import io
 import pathlib
+from datetime import date
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import roc_auc_score, brier_score_loss
@@ -218,11 +219,16 @@ def dob_to_age(dob):
     return round((REF_DATE - pd.Timestamp(dob)).days / 365.25, 1)
 
 
+def calc_completed_years(issue_date):
+    days = (REF_DATE - pd.Timestamp(issue_date)).days
+    return max(1, min(5, int(days / 365)))
+
+
 def process_manual(d, geo_risk):
     nats = [s['nationality'] for s in d['shareholders']]
     nat_risks = [geo_risk.get(n, 'Medium') for n in nats if n]
     w_nat_risk = compute_weighted_risk(nat_risks)
-    ry = max(1, min(5, int((REF_DATE - pd.Timestamp(d['issue_date'])).days / 365)))
+    ry = d['renewal_year']
     yv = d['year_transactions'] + [0] * (5 - len(d['year_transactions']))
     ri = ry - 1
     lt = yv[ri]
@@ -343,7 +349,8 @@ st.markdown("""<style>
 .factor-card{background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:.8rem 1rem;margin:.3rem 0}
 .factor-title{font-size:.8rem;color:#888}
 .factor-value{font-size:1.1rem;font-weight:600;color:#1F4E79}
-.age-display{background:#F0FFF4;border:1px solid #27AE60;border-radius:6px;padding:.4rem .8rem;margin-top:.3rem;text-align:center;font-weight:600;color:#27AE60}
+.age-badge{background:#F0FFF4;border:1px solid #27AE60;border-radius:6px;padding:.3rem .6rem;margin-top:.2rem;text-align:center;font-weight:600;color:#27AE60;font-size:.9rem}
+.year-info{background:#EBF5FB;border:1px solid #2E86AB;border-radius:8px;padding:.8rem 1rem;margin:.5rem 0;font-size:.9rem}
 </style>""", unsafe_allow_html=True)
 
 st.markdown('<p class="main-header">B2C License Renewal Predictor</p>', unsafe_allow_html=True)
@@ -361,7 +368,7 @@ if act_ref is None:
 if geo_risk is None:
     missing_files.append("Geo Risk List")
 if missing_files:
-    st.warning(f"Could not load: **{', '.join(missing_files)}**. Check the error messages above.")
+    st.warning(f"Could not load: **{', '.join(missing_files)}**. Check error messages above.")
     st.stop()
 
 NATIONALITY_LIST = sorted(geo_risk.keys())
@@ -373,7 +380,6 @@ with st.sidebar:
     st.metric("Accuracy", f"{metrics['accuracy']:.1%}")
     st.divider()
     st.markdown(f"**Training:** {metrics['train_size']:,} rows")
-    st.markdown(f"**Activities loaded:** {len(act_ref):,}")
     st.markdown(f"**Countries loaded:** {len(geo_risk):,}")
     st.divider()
     st.markdown("### Risk Thresholds")
@@ -388,6 +394,10 @@ tab1, tab2, tab3 = st.tabs(["✍️ Manual Input", "📊 Bulk Upload", "📋 Gui
 # TAB 1 — MANUAL INPUT
 # ══════════════════════════════════════════════════════════════════════════════
 with tab1:
+    # Reserve space for result at top
+    result_container = st.container()
+
+    st.markdown("---")
     st.markdown("### Company Details")
     ca, cb = st.columns(2)
     with ca:
@@ -401,13 +411,33 @@ with tab1:
         groups_opted = st.number_input("No of Groups Opted", min_value=1, max_value=10, value=2)
         activity_risk = st.selectbox("Weighted Activity Risk", ['Low', 'Medium', 'High', 'Override'], index=1)
         third_party = st.selectbox("Third-party Approval Required", ['No', 'Yes'], index=0)
-        st.markdown("**Yearly Transactions**")
-        yr_cols_input = st.columns(5)
-        year_txns = []
-        for i, yc_col in enumerate(yr_cols_input):
-            with yc_col:
-                v = st.number_input(f"Y{i+1}", min_value=0, max_value=500, value=0, key=f"yr_{i}")
-                year_txns.append(v)
+
+    # Auto-calculate completed years and renewal year
+    completed_years = calc_completed_years(issue_date)
+    renewal_year = completed_years
+
+    st.markdown("---")
+    st.markdown("### Yearly Transactions")
+    issue_yr = pd.Timestamp(issue_date).year
+    st.markdown(f"""<div class="year-info">
+        <strong>License issued:</strong> {issue_date} &nbsp;→&nbsp;
+        <strong>Completed years:</strong> {completed_years} &nbsp;→&nbsp;
+        <strong>Predicting:</strong> Year {renewal_year} → Year {renewal_year + 1} renewal decision
+    </div>""", unsafe_allow_html=True)
+
+    yr_cols_input = st.columns(completed_years)
+    year_txns = []
+    for i in range(completed_years):
+        with yr_cols_input[i]:
+            yr_start = issue_yr + i
+            yr_end = issue_yr + i + 1
+            v = st.number_input(
+                f"Year {i+1} ({yr_start}–{yr_end})",
+                min_value=0, max_value=500, value=0, key=f"yr_{i}")
+            year_txns.append(v)
+    # Pad to 5 years
+    while len(year_txns) < 5:
+        year_txns.append(0)
 
     st.markdown("---")
     st.markdown("### Shareholder Details")
@@ -424,7 +454,7 @@ with tab1:
                                     max_value=pd.Timestamp('2008-01-01'),
                                     key=f"sh_dob_{i}")
                 age = dob_to_age(dob)
-                st.markdown(f'<div class="age-display">Age: {age:.0f} years</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="age-badge">Age: {age:.0f} yrs</div>', unsafe_allow_html=True)
                 nationality = st.selectbox("Nationality", NATIONALITY_LIST,
                     index=NATIONALITY_LIST.index('United Arab Emirates'), key=f"sh_nat_{i}")
                 shareholders.append({'age': age, 'nationality': nationality})
@@ -440,6 +470,7 @@ with tab1:
                 'num_shareholders': num_shareholders,
                 'total_activities': total_activities, 'groups_opted': groups_opted,
                 'activity_risk': activity_risk, 'third_party': third_party,
+                'renewal_year': renewal_year,
                 'shareholders': shareholders, 'year_transactions': year_txns}
 
             processed = process_manual(data, geo_risk)
@@ -447,35 +478,34 @@ with tab1:
             risk = risk_category(prob)
             emoji = risk_emoji(risk)
             color = risk_color(risk)
+            vals = processed.iloc[0]
 
-            st.markdown("---")
-            rc1, rc2 = st.columns([1, 2])
-            with rc1:
-                st.markdown(f"""<div class="result-box" style="background:{color}15;border:2px solid {color};">
-                    <div style="font-size:1rem;color:#666;">Renewal Probability</div>
-                    <div class="score-big" style="color:{color};">{prob:.1%}</div>
-                    <div class="score-label" style="color:{color};">{emoji} {risk}</div>
-                </div>""", unsafe_allow_html=True)
-                st.markdown(f"""<div class="result-box" style="background:#F8FAFC;border:1px solid #E2E8F0;">
-                    <div style="font-size:.9rem;color:#666;">Company</div>
-                    <div style="font-size:1.3rem;font-weight:700;color:#1F4E79;">{company_name}</div>
-                </div>""", unsafe_allow_html=True)
-            with rc2:
-                st.markdown("**Key Factors**")
-                vals = processed.iloc[0]
-                f1, f2, f3 = st.columns(3)
-                with f1:
-                    st.markdown(f'<div class="factor-card"><div class="factor-title">Renewal Year</div><div class="factor-value">{int(vals["Renewal Year"])}</div></div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="factor-card"><div class="factor-title">Latest Year Txns</div><div class="factor-value">{int(vals["Latest Year Transactions"])}</div></div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="factor-card"><div class="factor-title">Cumulative Txns</div><div class="factor-value">{int(vals["Cumulative Transactions"])}</div></div>', unsafe_allow_html=True)
-                with f2:
-                    st.markdown(f'<div class="factor-card"><div class="factor-title">Engagement Ratio</div><div class="factor-value">{vals["Engagement Ratio"]:.2f}</div></div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="factor-card"><div class="factor-title">Txns per Visa</div><div class="factor-value">{vals["Transactions per Visa"]:.1f}</div></div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="factor-card"><div class="factor-title">Trend</div><div class="factor-value">{int(vals["Transaction Trend"]):+d}</div></div>', unsafe_allow_html=True)
-                with f3:
-                    st.markdown(f'<div class="factor-card"><div class="factor-title">Activity Risk</div><div class="factor-value">{activity_risk}</div></div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="factor-card"><div class="factor-title">Nationality Risk</div><div class="factor-value">{vals.get("_w_nat_risk_label", "Medium")}</div></div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="factor-card"><div class="factor-title">Avg Shareholder Age</div><div class="factor-value">{vals["Average Shareholder Age"]:.0f}</div></div>', unsafe_allow_html=True)
+            # Show result at top
+            with result_container:
+                st.markdown("### Prediction Result")
+                rc1, rc2 = st.columns([1, 2])
+                with rc1:
+                    st.markdown(f"""<div class="result-box" style="background:{color}15;border:2px solid {color};">
+                        <div style="font-size:1rem;color:#666;">Renewal Probability</div>
+                        <div class="score-big" style="color:{color};">{prob:.1%}</div>
+                        <div class="score-label" style="color:{color};">{emoji} {risk}</div>
+                        <div style="font-size:.9rem;color:#666;margin-top:.8rem;">{company_name}</div>
+                    </div>""", unsafe_allow_html=True)
+                with rc2:
+                    st.markdown("**Key Factors Driving This Score**")
+                    f1, f2, f3 = st.columns(3)
+                    with f1:
+                        st.markdown(f'<div class="factor-card"><div class="factor-title">Renewal Year</div><div class="factor-value">{int(vals["Renewal Year"])}</div></div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="factor-card"><div class="factor-title">Latest Year Txns</div><div class="factor-value">{int(vals["Latest Year Transactions"])}</div></div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="factor-card"><div class="factor-title">Cumulative Txns</div><div class="factor-value">{int(vals["Cumulative Transactions"])}</div></div>', unsafe_allow_html=True)
+                    with f2:
+                        st.markdown(f'<div class="factor-card"><div class="factor-title">Engagement Ratio</div><div class="factor-value">{vals["Engagement Ratio"]:.2f}</div></div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="factor-card"><div class="factor-title">Txns per Visa</div><div class="factor-value">{vals["Transactions per Visa"]:.1f}</div></div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="factor-card"><div class="factor-title">Trend</div><div class="factor-value">{int(vals["Transaction Trend"]):+d}</div></div>', unsafe_allow_html=True)
+                    with f3:
+                        st.markdown(f'<div class="factor-card"><div class="factor-title">Activity Risk</div><div class="factor-value">{activity_risk}</div></div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="factor-card"><div class="factor-title">Nationality Risk</div><div class="factor-value">{vals.get("_w_nat_risk_label", "Medium")}</div></div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="factor-card"><div class="factor-title">Avg Shareholder Age</div><div class="factor-value">{vals["Average Shareholder Age"]:.0f}</div></div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — BULK UPLOAD
@@ -575,7 +605,7 @@ with tab2:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab3:
     st.markdown("### Manual Input")
-    st.markdown("Enter activity count, groups, risk level, and third-party approval directly. For shareholders, select date of birth and the app calculates age automatically.")
+    st.markdown("Enter license dates and the app auto-calculates how many completed years and which Year fields to show. Select DOB for shareholders and age calculates automatically.")
 
     st.markdown("### Bulk Upload Format")
     st.markdown("""
