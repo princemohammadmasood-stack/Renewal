@@ -73,8 +73,9 @@ def load_activity_reference():
         if 'Category' in df.columns:
             df['Category'] = df['Category'].astype(str).str.strip()
         return df
-    except FileNotFoundError:
-        return None
+    except Exception as e:
+    st.error(f"Error loading file: {e}")
+    return None
 
 
 @st.cache_data
@@ -93,8 +94,9 @@ def load_geo_risk():
         df['Country'] = df['Country'].astype(str).str.strip()
         df['Risk'] = df['Risk'].astype(str).str.strip()
         return dict(zip(df['Country'], df['Risk']))
-    except FileNotFoundError:
-        return None
+    except Exception as e:
+    st.error(f"Error loading file: {e}")
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
